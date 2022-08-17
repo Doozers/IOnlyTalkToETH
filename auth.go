@@ -48,7 +48,7 @@ func step0(ctx bertybot.Context, t jsonAuth) {
 	ctx.ReplyString(string(m))
 }
 
-func step2(ctx bertybot.Context, t jsonAuth) {
+func step2(ctx bertybot.Context, t jsonAuth, authorizedList *[]string) {
 	if t.Data["prev_nonce"] == "" || t.Data["prev_sig"] == "" || t.Data["ethPubkey"] == "" || t.Data["sig"] == "" || t.Data["hash"] == "" {
 		ctx.ReplyString("error: missing arg")
 		return
@@ -94,29 +94,32 @@ func step2(ctx bertybot.Context, t jsonAuth) {
 			return
 		}
 
+		*authorizedList = append(*authorizedList, ctx.ConversationPK)
 		ctx.ReplyString(string(m))
 		return
 	}
 	ctx.ReplyString("error: invalid signature")
 }
 
-func Auth(ctx bertybot.Context) {
-	data := strings.Replace(ctx.UserMessage, "/verify-me ", "", 1)
+func Auth(authorizedList *[]string) func(ctx bertybot.Context) {
+	return func(ctx bertybot.Context) {
+		data := strings.Replace(ctx.UserMessage, "/verify-me ", "", 1)
 
-	var t jsonAuth
-	err := json.Unmarshal([]byte(data), &t)
-	if err != nil {
-		ctx.ReplyString("error: " + err.Error())
-	}
+		var t jsonAuth
+		err := json.Unmarshal([]byte(data), &t)
+		if err != nil {
+			ctx.ReplyString("error: " + err.Error())
+		}
 
-	switch t.Step {
-	case 0:
-		step0(ctx, t)
-		break
-	case 2:
-		step2(ctx, t)
-		break
-	default:
-		ctx.ReplyString("error: unknown step")
+		switch t.Step {
+		case 0:
+			step0(ctx, t)
+			break
+		case 2:
+			step2(ctx, t, authorizedList)
+			break
+		default:
+			ctx.ReplyString("error: unknown step")
+		}
 	}
 }

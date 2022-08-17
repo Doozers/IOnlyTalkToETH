@@ -120,6 +120,7 @@ func doRoot(ctx context.Context, args []string) error { // nolint:gocognit
 
 	// berty bot
 	g.Add(func() error {
+		var authorizedList []string
 		err := lib.GenKeys("private.key", "public.key")
 		if err != nil {
 			return err
@@ -150,7 +151,25 @@ func doRoot(ctx context.Context, args []string) error { // nolint:gocognit
 				}
 				_ = ctx.ReplyString("pong")
 			}),
-			bertybot.WithCommand("verify-me", "auth", Auth),
+			bertybot.WithCommand("verify-me", "auth", Auth(&authorizedList)),
+			bertybot.WithCommand("chat", "auth", func(ctx bertybot.Context) {
+				if ctx.IsReplay || !ctx.IsNew {
+					return
+				}
+
+				var b bool
+				for _, v := range authorizedList {
+					if v == ctx.ConversationPK {
+						b = true
+						break
+					}
+				}
+				if !b {
+					_ = ctx.ReplyString("I only talk to ETH users")
+					return
+				}
+				_ = ctx.ReplyString("That's interesting !")
+			}),
 			bertybot.WithMessengerClient(client),
 		)
 		if opts.Debug {
