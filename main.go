@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
+	"io/ioutil"
 	"math/rand"
 	"moul.io/climan"
 	"moul.io/motd"
@@ -34,12 +35,19 @@ func main() {
 	}
 }
 
-var opts struct { // nolint:maligned
-	Debug         bool
-	BertyNodeAddr string
-	apiAdr        string
-	rootLogger    *zap.Logger
-}
+var (
+	opts struct { // nolint:maligned
+		Debug          bool
+		BertyNodeAddr  string
+		apiAdr         string
+		rootLogger     *zap.Logger
+		publickeyPath  string
+		privatekeyPath string
+		generateKeys   bool
+	}
+	PublicKey  []byte
+	PrivateKey []byte
+)
 
 func mainRun(args []string) error {
 	// parse CLI
@@ -53,6 +61,9 @@ func mainRun(args []string) error {
 			fs.BoolVar(&opts.Debug, "debug", false, "debug mode")
 			fs.StringVar(&opts.BertyNodeAddr, "berty-node-addr", "127.0.0.1:9091", "Berty node address")
 			fs.StringVar(&opts.apiAdr, "api-adr", "http://127.0.0.1:8080/access", "teritori API address")
+			fs.StringVar(&opts.publickeyPath, "publicKeyPath", "", "public key")
+			fs.StringVar(&opts.privatekeyPath, "privateKeyPath", "", "private key")
+			fs.BoolVar(&opts.generateKeys, "generate-keys", false, "generate keys")
 		},
 		Exec:      doRoot,
 		FFOptions: []ff.Option{ff.WithEnvVarPrefix(name)},
@@ -129,6 +140,31 @@ func doRoot(ctx context.Context, args []string) error { // nolint:gocognit
 			_ = ctx.ReplyString("version: " + bertyversion.Version)
 		}
 
+		// generate a pair of keys to use in the authentication process or use the ones provided by the user
+		if opts.generateKeys {
+			err = lib.GenKeys("private.key", "public.key")
+			if err != nil {
+				return err
+			}
+			opts.privatekeyPath = "private.key"
+			opts.publickeyPath = "public.key"
+		}
+
+		if opts.privatekeyPath == "" || opts.publickeyPath == "" {
+			return fmt.Errorf("missing --privatekeyPath or --publickeyPath: %w", flag.ErrHelp)
+		}
+
+		PrivateKey, err = ioutil.ReadFile(opts.privatekeyPath)
+		if err != nil {
+			return fmt.Errorf("read private key: %w", err)
+		}
+
+		PublicKey, err = ioutil.ReadFile(opts.publickeyPath)
+		if err != nil {
+			return fmt.Errorf("read public key: %w", err)
+		}
+		//
+
 		cc, err := grpc.Dial(opts.BertyNodeAddr, grpc.WithInsecure())
 		if err != nil {
 
@@ -140,7 +176,6 @@ func doRoot(ctx context.Context, args []string) error { // nolint:gocognit
 		newOpts = append(newOpts,
 			bertybot.WithLogger(logger.Named("berty")), // configure a logger
 			bertybot.WithDisplayName("IOnlyTalkToETH"), // bot name
-			//bertybot.WithHandler(bertybot.UserMessageHandler, userMessageHandler), // message handler
 			bertybot.WithCommand("version", "show version", versionCommand),
 			bertybot.WithRecipe(bertybot.AutoAcceptIncomingContactRequestRecipe()),
 			bertybot.WithRecipe(bertybot.AutoAcceptIncomingGroupInviteRecipe()),
@@ -151,25 +186,12 @@ func doRoot(ctx context.Context, args []string) error { // nolint:gocognit
 				}
 				_ = ctx.ReplyString("pong")
 			}),
-			bertybot.WithCommand("verify-me", "auth", Auth(&authorizedList)),
-			bertybot.WithCommand("chat", "auth", func(ctx bertybot.Context) {
-				if ctx.IsReplay || !ctx.IsNew {
-					return
-				}
 
-				var b bool
-				for _, v := range authorizedList {
-					if v == ctx.ConversationPK {
-						b = true
-						break
-					}
-				}
-				if !b {
-					_ = ctx.ReplyString("I only talk to ETH users")
-					return
-				}
-				_ = ctx.ReplyString("That's interesting !")
-			}),
+			// process to verify a new metamask account and add it to the authorized list
+			bertybot.WithCommand("verify-me", "auth", Auth(&authorizedList)),
+			// talk to the bot (only work if you are in the authorized list)
+			bertybot.WithCommand("chat", "auth", Chat(&authorizedList)),
+
 			bertybot.WithMessengerClient(client),
 		)
 		if opts.Debug {

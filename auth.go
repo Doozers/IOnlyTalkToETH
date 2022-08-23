@@ -2,103 +2,109 @@ package main
 
 import (
 	"berty.tech/berty/v2/go/pkg/bertybot"
+	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
-	"os"
 	"strings"
 
 	"github.com/Doozers/BasicPublicKeyEncryption/lib"
 	"github.com/Doozers/ETH-Signature/ethsign"
 )
 
+type metaData struct {
+	EthPubkey string `json:"pubkey,omitempty"`
+	PrevNonce string `json:"prev_nonce,omitempty"`
+	PrevSig   string `json:"prev_sig,omitempty"`
+	Sig       string `json:"sig,omitempty"`
+	Nonce     string `json:"nonce,omitempty"`
+	Message   string `json:"message,omitempty"`
+	HashType  string `json:"hash_type,omitempty"`
+}
+
 type jsonAuth struct {
-	Step int               `json:"step"`
-	Data map[string]string `json:"data"`
+	Step int      `json:"step"`
+	Data metaData `json:"data"`
 }
 
-func step0(ctx bertybot.Context, t jsonAuth) {
-	if t.Data["ethPubkey"] == "" {
-		ctx.ReplyString("error: missing ethPubKey")
-		return
+func step0(t jsonAuth) (*jsonAuth, error) {
+	if t.Data.EthPubkey == "" {
+		return nil, errors.New("missing ethPubKey")
 	}
 
-	// to modify
-	pubKey, err := os.ReadFile("public.key")
-	if err != nil {
-		ctx.ReplyString("error: " + err.Error())
-		return
-	}
-
+	// hash(nonce+pubkey) and sign the hash
 	nonce := rand.Int()
-
-	m, err := json.Marshal(jsonAuth{
+	proof := fmt.Sprintf("%d%ssisi", nonce, t.Data.EthPubkey)
+	hash := sha256.Sum256([]byte(proof))
+	sig := lib.Sign((*[64]byte)(PublicKey), hash[:])
+	b64sig := base64.StdEncoding.EncodeToString(sig)
+	data := jsonAuth{
 		Step: 1,
-		Data: map[string]string{
-			"nonce": fmt.Sprintf("%d", nonce),
-			"sig":   base64.StdEncoding.EncodeToString(lib.Sign((*[64]byte)(pubKey), []byte(fmt.Sprintf("%d%ssisi", nonce, t.Data["ethPubkey"])))),
+		Data: metaData{
+			Nonce:   fmt.Sprintf("%d", nonce),
+			Sig:     b64sig,
+			Message: "hash(Nonce+Sig) and sign the hash",
 		},
-	})
-	if err != nil {
-		ctx.ReplyString("error: " + err.Error())
-		return
 	}
-	fmt.Println(base64.StdEncoding.EncodeToString(lib.Sign((*[64]byte)(pubKey), []byte(fmt.Sprintf("%d%ssisi", nonce, t.Data["ethPubkey"])))))
-	ctx.ReplyString(string(m))
+
+	// Here because if you are using berty mini you won't be able to see the full message (https://github.com/berty/berty/issues/4360)
+	fmt.Println(data)
+
+	return &data, nil
 }
 
-func step2(ctx bertybot.Context, t jsonAuth, authorizedList *[]string) {
-	if t.Data["prev_nonce"] == "" || t.Data["prev_sig"] == "" || t.Data["ethPubkey"] == "" || t.Data["sig"] == "" || t.Data["hash"] == "" {
-		ctx.ReplyString("error: missing arg")
-		return
+func step2(convPubkey string, t jsonAuth, authorizedList *[]string) (*jsonAuth, error) {
+	if t.Data.PrevNonce == "" || t.Data.PrevSig == "" || t.Data.EthPubkey == "" || t.Data.Sig == "" || t.Data.HashType == "" {
+		return nil, errors.New("missing data")
 	}
 
-	privKey, err := os.ReadFile("private.key")
+	// verify the authenticity of the given previous signature
+	prevSig, err := base64.StdEncoding.DecodeString(t.Data.PrevSig)
 	if err != nil {
-		ctx.ReplyString("error: " + err.Error())
-		return
+		return nil, err
 	}
 
-	prevSig, err := base64.StdEncoding.DecodeString(t.Data["prev_sig"])
-	if err != nil {
-		ctx.ReplyString("error: " + err.Error())
-		return
+	res, ok := lib.Verify((*[32]byte)(PrivateKey), prevSig)
+
+	// check if the signature is valid (is the user owner of the private key linked to the given public key)
+	hash32 := sha256.Sum256([]byte(fmt.Sprintf("%d%ssisi", t.Data.PrevNonce, t.Data.EthPubkey+"sisi")))
+	hash := hash32[:]
+	if !ok || bytes.Equal(res, hash) {
+		return nil, errors.New("invalid previous signature")
 	}
 
-	res, ok := lib.Verify((*[32]byte)(privKey), prevSig)
-	fmt.Println(string(res))
-	if !ok || string(res) != t.Data["prev_nonce"]+t.Data["ethPubkey"]+"sisi" {
-		ctx.ReplyString("error: invalid previous signature")
-		return
-	}
+	hash32_2 := sha256.Sum256([]byte(t.Data.PrevNonce + t.Data.PrevSig))
+	hash2 := hash32_2[:]
 
-	switch t.Data["hash"] {
+	switch t.Data.HashType {
 	case "text":
-		ok, err = ethsign.Verify(t.Data["prev_nonce"]+t.Data["prev_sig"], t.Data["sig"], t.Data["ethPubkey"], ethsign.TextHash)
-		break
+		ok, err = ethsign.Verify(fmt.Sprintf("%x", hash2), t.Data.Sig, t.Data.EthPubkey, ethsign.TextHash)
 	case "keccak256":
-		ok, err = ethsign.Verify(t.Data["prev_nonce"]+t.Data["prev_sig"], t.Data["sig"], t.Data["ethPubkey"], ethsign.Keccak256)
-		break
+		ok, err = ethsign.Verify(fmt.Sprintf("%x", hash2), t.Data.Sig, t.Data.EthPubkey, ethsign.Keccak256)
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	if ok {
-		m, err := json.Marshal(jsonAuth{
+		j := jsonAuth{
 			Step: 3,
-			Data: map[string]string{
-				"message": "sync accepted",
+			Data: metaData{
+				Message: "sync accepted",
 			},
-		})
+		}
 		if err != nil {
-			ctx.ReplyString("error: " + err.Error())
-			return
+			return nil, errors.New("error: " + err.Error())
 		}
 
-		*authorizedList = append(*authorizedList, ctx.ConversationPK)
-		ctx.ReplyString(string(m))
-		return
+		// whitelist the conversation public key
+		*authorizedList = append(*authorizedList, convPubkey)
+		return &j, nil
 	}
-	ctx.ReplyString("error: invalid signature")
+	return nil, errors.New("error: invalid sig")
 }
 
 func Auth(authorizedList *[]string) func(ctx bertybot.Context) {
@@ -111,15 +117,47 @@ func Auth(authorizedList *[]string) func(ctx bertybot.Context) {
 			ctx.ReplyString("error: " + err.Error())
 		}
 
+		var res *jsonAuth
+
 		switch t.Step {
 		case 0:
-			step0(ctx, t)
+			res, err = step0(t)
 			break
 		case 2:
-			step2(ctx, t, authorizedList)
+			res, err = step2(ctx.ConversationPK, t, authorizedList)
 			break
 		default:
-			ctx.ReplyString("error: unknown step")
+			err = errors.New("error: invalid step")
 		}
+
+		if err != nil {
+			ctx.ReplyString("error: " + err.Error())
+		} else {
+			s, err := json.Marshal(res)
+			if err != nil {
+				ctx.ReplyString("error: " + err.Error())
+			} else {
+				ctx.ReplyString(string(s))
+			}
+		}
+	}
+}
+
+func Chat(authorizedList *[]string) func(ctx bertybot.Context) {
+	return func(ctx bertybot.Context) {
+		if ctx.IsReplay || !ctx.IsNew {
+			return
+		}
+
+		auth := *authorizedList
+
+		// check if the conversation is authorized
+		for _, v := range auth {
+			if v == ctx.ConversationPK {
+				_ = ctx.ReplyString("I'm proud of you !")
+				return
+			}
+		}
+		_ = ctx.ReplyString("I only talk to ETH verified users, '//verify-me' to verify yourself.")
 	}
 }
